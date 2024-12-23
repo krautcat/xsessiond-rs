@@ -1,0 +1,30 @@
+[package]
+name = "sessiond"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+chrono = "0.4"
+sysinfo = "0.31"
+
+[dependencies.xcb]
+version = "1.4.0"
+features = ["res"]
+
+[dependencies.xcb-wm]
+version = "0.4"
+features = [ "ewmh", "icccm" ]
+
+[dependencies.nix]
+version = "0.29.0"
+features = [
+    "process",
+    "fs"
+]
+
+[dependencies.signal-hook]
+version = "0.3.0"
+features = [ 
+    "extended-siginfo"
+]
