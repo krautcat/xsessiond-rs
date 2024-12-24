@@ -1,4 +1,3 @@
-use std::boxed::Box;
 use std::convert::From;
 
 use sysinfo::Pid;
@@ -16,6 +15,27 @@ pub struct ClientError {
     err_type: ClientErrorType,
 }
 
+impl ClientError {
+    pub fn new(err: ClientErrorType) -> Self {
+        return ClientError { err_type: err };
+    }
+}
+
+#[derive(Debug)]
+pub enum GatherInfoErrorType {
+    WindowDesktopNumber,
+}
+
+#[derive(Debug)]
+pub struct GatherInfoError {
+    err: GatherInfoErrorType,
+}
+
+impl GatherInfoError {
+    pub fn new(err: GatherInfoErrorType) -> Self {
+        return GatherInfoError { err };
+    }
+}
 pub struct X11WindowInformation<'a> {
     pub x11_window: &'a X11Window,
     pub x11_resource_id: u32,
@@ -46,18 +66,18 @@ impl<'a> X11WindowInformation<'a> {
 }
 
 pub struct X11Client<'a> {
-    pub x11_connection: Box<X11Connection>,
+    pub x11_connection: X11Connection,
     ewmh_connection: Option<EWMHConnection<'a>>,
     icccm_connection: Option<ICCCMConnection<'a>>,
 
-    x11_screen: i32,
+    pub x11_screen: i32,
 }
 
 impl<'a> X11Client<'a> {
     pub fn new() -> Self {
         let (x11_con, x11_screen) = X11Connection::connect(None).unwrap();
         return X11Client {
-            x11_connection: Box::new(x11_con),
+            x11_connection: x11_con,
             ewmh_connection: None,
             icccm_connection: None,
 
@@ -65,22 +85,35 @@ impl<'a> X11Client<'a> {
         };
     }
 
-    pub fn connect(self: &'a mut Self) -> () {
+    pub fn connect(self: &'a mut Self) -> &Self {
         self.ewmh_connection = Some(EWMHConnection::connect(&self.x11_connection));
         self.icccm_connection = Some(ICCCMConnection::connect(&self.x11_connection));
+
+        return self;
     }
 
-    pub fn get_window_information(self: &'a Self, window: &'a X11Window) -> X11WindowInformation {
-        let desktop_number = self.get_desktop_number_of_window(window);
+    pub fn get_wm_clients(self: &Self) -> Vec<X11Window> {
+        let request_cookie = self.ewmh_connection.as_ref().unwrap().send_request(&xcb_wm::ewmh::proto::GetClientList);
+        return self.ewmh_connection.as_ref().unwrap().wait_for_reply(request_cookie).unwrap().clients;
+    }
 
-        return X11WindowInformation::new(
+    pub fn get_window_information(
+        self: &'a Self,
+        window: &'a X11Window,
+    ) -> Result<X11WindowInformation, GatherInfoError> {
+        let desktop_number = match self.get_desktop_number_of_window(window) {
+            Ok(r) => r,
+            Err(e) => return Err(e),
+        };
+
+        return Ok(X11WindowInformation::new(
             window,
             window.resource_id(),
             self.get_window_name(window),
             desktop_number,
             self.get_desktop_name_of_window(desktop_number),
             self.get_process_id_of_local_client(window),
-        );
+        ));
     }
 
     fn get_window_name(self: &Self, window: &X11Window) -> String {
@@ -92,21 +125,28 @@ impl<'a> X11Client<'a> {
             .clone();
     }
 
-    fn get_desktop_number_of_window(self: &Self, window: &X11Window) -> u32 {
+    fn get_desktop_number_of_window(
+        self: &Self,
+        window: &X11Window,
+    ) -> Result<u32, GatherInfoError> {
         let ewmh_con = self.ewmh_connection.as_ref().unwrap();
-        return ewmh_con
+
+        match ewmh_con
             .wait_for_reply(ewmh_con.send_request(&xcb_wm::ewmh::proto::GetWmDesktop(*window)))
-            .unwrap()
-            .desktop;
+        {
+            Ok(reply) => return Ok(reply.desktop),
+            Err(_) => {
+                return Err(GatherInfoError::new(
+                    GatherInfoErrorType::WindowDesktopNumber,
+                ))
+            }
+        }
     }
 
     fn get_desktop_name_of_window(self: &Self, number: u32) -> String {
-        let ewmh_con = self
-            .ewmh_connection.as_ref().unwrap();
-         let desktop_names = ewmh_con.wait_for_reply(
-                ewmh_con
-                    .send_request(&xcb_wm::ewmh::proto::GetDesktopNames),
-            )
+        let ewmh_con = self.ewmh_connection.as_ref().unwrap();
+        let desktop_names = ewmh_con
+            .wait_for_reply(ewmh_con.send_request(&xcb_wm::ewmh::proto::GetDesktopNames))
             .unwrap();
         return desktop_names.names[usize::try_from(number).unwrap()].clone();
     }

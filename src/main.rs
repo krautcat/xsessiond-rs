@@ -1,27 +1,12 @@
-use core::borrow::{Borrow, BorrowMut};
-use core::ops::Deref;
-
-use std::cell::RefCell;
 use std::clone::Clone;
-use std::collections::{HashMap, HashSet};
 use std::env;
-use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::hash::Hash;
-use std::io;
-use std::io::Write;
-use std::option;
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process;
-use std::rc::Rc;
-use std::str;
-use std::string::String;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::thread;
 
-use chrono::prelude::*;
 use libc;
 use nix::errno::Errno;
 use nix::fcntl::{open, OFlag as FileOFlag};
@@ -32,17 +17,9 @@ use signal_hook::consts::TERM_SIGNALS;
 use signal_hook::flag;
 use signal_hook::iterator::exfiltrator::origin::WithOrigin;
 use signal_hook::iterator::SignalsInfo;
-use sysinfo::{Pid, Process, System};
-use xcb::res;
-use xcb::x;
-use xcb::x::Window;
-use xcb::Connection;
-use xcb::Error;
-use xcb::Event;
-use xcb::Xid;
-use xcb_wm::ewmh::proto;
 
-use crate::application::Application;
+use sessiond::application::{Application, ApplicationError};
+use sessiond::x11_client::X11Client;
 
 enum DaemonizeErrorType {
     Fork,
@@ -150,10 +127,10 @@ impl Daemon {
             }
         }
 
-        match self.redirect_standard_streams() {
+        /*match self.redirect_standard_streams() {
             Ok(_) => (),
             Err(err) => return Err(err),
-        }
+        }*/
 
         return Ok(pid.unwrap());
     }
@@ -213,51 +190,6 @@ impl Daemon {
     }
 }
 
-enum ApplicationErrorType {
-    X11Error,
-    ConnectionError,
-    ProtocolError,
-}
-
-struct ApplicationError {
-    kind: ApplicationErrorType,
-    retcode: i32,
-}
-
-#[derive(PartialEq, Eq, Hash)]
-struct WindowInfo {
-    window_name: String,
-    window_xid: u32,
-    desktop_name: String,
-    desktop_number: u32,
-}
-
-impl WindowInfo {
-    fn new(name: &String, xid: u32, dname: &String, dnum: u32) -> Self {
-        return WindowInfo {
-            window_name: name.clone(),
-            window_xid: xid,
-            desktop_name: dname.clone(),
-            desktop_number: dnum,
-        };
-    }
-}
-
-#[derive(Clone, Eq, PartialEq, Hash)]
-struct ProcessInfo {
-    cmdline: String,
-    process_id: usize,
-}
-
-impl ProcessInfo {
-    fn new(cmdline: String, process_id: usize) -> Self {
-        return ProcessInfo {
-            cmdline,
-            process_id,
-        };
-    }
-}
-
 fn main() -> process::ExitCode {
     let daemon_is_running = Arc::new(Mutex::new(true));
     let daemon = Daemon::new(daemon_is_running.clone());
@@ -291,10 +223,9 @@ fn main() -> process::ExitCode {
             let mut signals = SignalsInfo::<WithOrigin>::new(&sigs).unwrap();
 
             let daemon_thread = std::thread::spawn(move || {
-                let x11_client = X11Client::new();
-                x11_client.connect();
+                let mut x11_client = X11Client::new();
                 
-                let mut app = Application::new(daemon.is_running.clone(), x11_client);
+                let mut app = Application::new(daemon.is_running.clone(), &mut x11_client);
                 
                 return daemon.run(&mut app);
             });

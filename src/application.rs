@@ -1,54 +1,47 @@
-use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
 
-use sysinfo::{ProcessesToUpdate, System};
 use xcb;
-use xcb::Xid;
-use xcb::x::Window;
 
-use crate::info::{ProcessInfo, WindowInfo};
+use crate::info::ProcessesWindowsInfo;
 use crate::x11_client::X11Client;
 
-enum ApplicationErrorType {
+pub enum ApplicationErrorType {
     X11Error,
     ConnectionError,
     ProtocolError,
 }
 
-struct ApplicationError {
-    kind: ApplicationErrorType,
-    retcode: i32,
+pub struct ApplicationError {
+    pub kind: ApplicationErrorType,
+    pub retcode: i32,
 }
-
 pub struct Application<'a> {
-    x11_client: X11Client<'a>,
+    x11_client: &'a X11Client<'a>,
 
-    sysinfo: System,
-    processes: HashMap<ProcessInfo, HashSet<WindowInfo>>,
+    proc_win_info: ProcessesWindowsInfo,
 
     is_running: Arc<Mutex<bool>>,
 }
 
 impl<'a> Application<'a> {
-    pub fn new(
-        running: Arc<Mutex<bool>>,
-        x11_client: X11Client<'a>,
-    ) -> Self {
+    pub fn new(running: Arc<Mutex<bool>>, x11_client: &'a mut X11Client<'a>) -> Self {
         return Application {
-            x11_client: x11_client,
-            sysinfo: System::new_all(),
-            processes: HashMap::new(), 
+            x11_client: x11_client.connect(),
+            proc_win_info: ProcessesWindowsInfo::new(),
             is_running: running,
         };
     }
 
-    fn run(self: &'_ mut Self) -> Result<i32, ApplicationError> {
-        println!("HERE");
-        let wm_client_list = self.x11_client.x11_connection.send_request(&xcb::x::InternAtom {
-            only_if_exists: true,
-            name: "_NET_CLIENT_LIST".as_bytes(),
-        });
+    pub fn run(self: &mut Self) -> Result<i32, ApplicationError> {
+        let x11_conn = &self.x11_client.x11_connection;
+        
+        let wm_client_list = self
+            .x11_client
+            .x11_connection
+            .send_request(&xcb::x::InternAtom {
+                only_if_exists: true,
+                name: "_NET_CLIENT_LIST".as_bytes(),
+            });
         let wm_client_list = self
             .x11_client
             .x11_connection
@@ -57,35 +50,43 @@ impl<'a> Application<'a> {
             .atom();
         assert!(wm_client_list != xcb::x::ATOM_NONE, "EWMH not supported");
 
-        for screen in self.x11_client.x11_connection.get_setup().roots() {
-            let window = screen.root();
+        /*let root_window = x11_conn
+            .get_setup()
+            .roots()
+            .nth(self.x11_client.x11_screen as usize)
+            .unwrap();
 
-            let pointer = self.x11_client.x11_connection
-                .wait_for_reply(
-                    self.x11_client.x11_connection.send_request(&xcb::x::QueryPointer { window }),
-                )
-                .unwrap();
+        let tree_reply = x11_conn.wait_for_reply(x11_conn.send_request(&xcb::x::QueryTree {
+            window: root_window.root(),
+        }));
 
-            if pointer.same_screen() {
-                let list = self.x11_client.x11_connection
-                    .wait_for_reply(self.x11_client.x11_connection.send_request(&xcb::x::GetProperty {
-                        delete: false,
-                        window,
-                        property: wm_client_list,
-                        r#type: xcb::x::ATOM_NONE,
-                        long_offset: 0,
-                        long_length: 100,
-                    }))
-                    .unwrap();
+        for c in tree_reply.unwrap().children() {
+            let window_information = self.x11_client.get_window_information(c);
+            self.proc_win_info.insert(&window_information.unwrap());
+        }*/
 
-                for client in list.value::<xcb::x::Window>() {
-                    self.set_window_information(client);
-                }
-            }
+        for w in self.x11_client.get_wm_clients() {
+            let window_info = self.x11_client.get_window_information(&w).unwrap();
+            self.proc_win_info.insert(&window_info);
+        }
+
+
+        for proc_windows_info_iter in self.proc_win_info.procinfo.iter() {
+            println!(
+                "Process '{}' with pid '{}' has windows with xids '{}'",
+                proc_windows_info_iter.0.cmdline,
+                proc_windows_info_iter.0.process_id,
+                proc_windows_info_iter
+                    .1
+                    .into_iter()
+                    .map(|w_i| w_i.window_xid.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            );
         }
 
         while *self.is_running.lock().unwrap() {
-            let event = match self.x11_client.x11_connection.wait_for_event() {
+            let event = match x11_conn.wait_for_event() {
                 Err(xcb::Error::Connection(_)) => {
                     return Err(ApplicationError {
                         kind: ApplicationErrorType::ConnectionError,
@@ -104,78 +105,18 @@ impl<'a> Application<'a> {
             match event {
                 xcb::Event::X(xcb::x::Event::CreateNotify(ev)) => {
                     let window = ev.window();
-                    self.set_window_information(&window);
+                    self.proc_win_info
+                        .insert(&self.x11_client.get_window_information(&window).unwrap());
                 }
                 xcb::Event::X(xcb::x::Event::DestroyNotify(ev)) => {
                     let window = ev.window();
-                    self.delete_window_information(&window);
+                    self.proc_win_info
+                        .remove(&self.x11_client.get_window_information(&window).unwrap());
                 }
                 xcb::Event::X(xcb::x::Event::PropertyNotify(_ev)) => {}
                 _ => {}
             }
         }
         return Ok(0);
-    }
-
-
-    fn set_window_information(self: &mut Self, window: &Window) -> () {
-        let x11_wininfo = self.x11_client.get_window_information(window);
-
-        self.sysinfo.refresh_processes(ProcessesToUpdate::All);
-        let process = self.sysinfo.process(x11_wininfo.process_id);
-        match process {
-            Some(p) => {
-                let cmdline = p.cmd().join(OsStr::new(" ")).into_string().unwrap();
-
-                let window_info = WindowInfo::new(
-                    &x11_wininfo.x11_window_name,
-                    x11_wininfo.x11_resource_id,
-                    &x11_wininfo.x11_desktop_name,
-                    x11_wininfo.x11_desktop_number,
-                );
-                let proc_info = ProcessInfo::new(cmdline, usize::try_from(x11_wininfo.process_id.as_u32()).unwrap());
-                match self.processes.get_mut(&proc_info) {
-                    Some(w_infos) => {
-                        w_infos.insert(window_info);
-                    }
-                    None => {
-                        let mut hash_set = HashSet::new();
-                        hash_set.insert(window_info);
-                        self.processes.insert(proc_info, hash_set);
-                    }
-                }
-            }
-            None => {}
-        }
-    }
-
-    fn delete_window_information(self: &mut Self, window: &Window) -> () {
-        let x11_wininfo = self.x11_client.get_window_information(window);
-
-        self.sysinfo.refresh_processes(ProcessesToUpdate::All);
-        let process = self.sysinfo.process(x11_wininfo.process_id);
-        match process {
-            Some(p) => {
-                let cmdline = p.cmd().join(OsStr::new(" ")).into_string().unwrap();
-
-                let proc_info = ProcessInfo::new(cmdline, usize::try_from(x11_wininfo.process_id.as_u32()).unwrap());
-                let mut w_infos_for_proc = self.processes.get_mut(&proc_info);
-                match w_infos_for_proc {
-                    Some(w_infos) => {
-                        for w_i in w_infos.iter() {
-                            if w_i.window_xid == window.resource_id() {
-                                w_infos_for_proc.unwrap().remove(w_i);
-                            }
-                        }
-
-                        if w_infos.is_empty() {
-                            self.processes.remove(&proc_info);
-                        }
-                    }
-                    None => {}
-                }
-            }
-            None => {}
-        }
     }
 }
